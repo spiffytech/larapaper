@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Enums\ImageFormat;
 use App\Models\Device;
 use App\Models\DeviceModel;
+use App\Services\DeviceImageResolver;
 use App\Services\ImageGenerationService;
 use Bnussbau\EpaperPipeline\EpaperPipeline;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -499,4 +500,132 @@ it('generates BMP for legacy device with bmp3_1bit_srgb format', function (): vo
     expect($imageInfo[0])->toBe(800); // Width
     expect($imageInfo[1])->toBe(480); // Height
     expect($imageInfo[2])->toBe(IMAGETYPE_BMP); // BMP type
+});
+
+it('returns the same identifier when the same markup is rendered twice', function (): void {
+    $device = Device::factory()->create([
+        'width' => 800,
+        'height' => 480,
+        'rotate' => 0,
+        'image_format' => ImageFormat::PNG_8BIT_GRAYSCALE->value,
+    ]);
+
+    $markup = '<div style="background: white; color: black;">Stable content</div>';
+
+    $firstHash = ImageGenerationService::generateImage($markup, $device->id);
+    $secondHash = ImageGenerationService::generateImage($markup, $device->id);
+
+    expect($secondHash)->toBe($firstHash);
+    Storage::disk('public')->assertExists("/images/generated/{$firstHash}.png");
+});
+
+it('returns different identifiers for different rendered content', function (): void {
+    // Render at different dimensions so the produced bytes differ, otherwise
+    // the fake pipeline yields identical pixels for any markup.
+    $smallDevice = Device::factory()->create([
+        'width' => 800,
+        'height' => 480,
+        'rotate' => 0,
+        'image_format' => ImageFormat::AUTO->value,
+    ]);
+    $largeDevice = Device::factory()->create([
+        'width' => 1024,
+        'height' => 768,
+        'rotate' => 0,
+        'image_format' => ImageFormat::AUTO->value,
+    ]);
+
+    $markup = '<div>Test</div>';
+    $smallHash = ImageGenerationService::generateImage($markup, $smallDevice->id);
+    $largeHash = ImageGenerationService::generateImage($markup, $largeDevice->id);
+
+    expect($largeHash)->not->toBe($smallHash);
+    Storage::disk('public')->assertExists("/images/generated/{$smallHash}.png");
+    Storage::disk('public')->assertExists("/images/generated/{$largeHash}.png");
+});
+
+it('does not write a duplicate file when content already exists on disk', function (): void {
+    $device = Device::factory()->create([
+        'width' => 800,
+        'height' => 480,
+        'rotate' => 0,
+        'image_format' => ImageFormat::PNG_8BIT_GRAYSCALE->value,
+    ]);
+
+    $markup = '<div>Stable</div>';
+    $hash = ImageGenerationService::generateImage($markup, $device->id);
+    $path = "/images/generated/{$hash}.png";
+    Storage::disk('public')->assertExists($path);
+
+    // Mutate the stored file's mtime so a re-write would be observable, then
+    // re-render: content-addressing should hit the existence short-circuit and
+    // leave the original file untouched.
+    $originalMtime = filemtime(Storage::disk('public')->path($path));
+    sleep(1);
+
+    $secondHash = ImageGenerationService::generateImage($markup, $device->id);
+
+    expect($secondHash)->toBe($hash);
+    $files = Storage::disk('public')->files('/images/generated');
+    $matching = array_filter($files, fn (string $f): bool => str_starts_with(basename($f), $hash));
+    expect($matching)->toHaveCount(1);
+    clearstatcache();
+    expect(filemtime(Storage::disk('public')->path($path)))->toBe($originalMtime);
+});
+
+it('produces a hex content hash identifier, not a uuid', function (): void {
+    $device = Device::factory()->create([
+        'width' => 800,
+        'height' => 480,
+        'rotate' => 0,
+        'image_format' => ImageFormat::PNG_8BIT_GRAYSCALE->value,
+    ]);
+
+    $hash = ImageGenerationService::generateImage('<div>Test</div>', $device->id);
+
+    // sha256 hex: 64 lowercase hex chars, not a dashed uuid.
+    expect($hash)->toMatch('/^[0-9a-f]{64}$/');
+    expect($hash)->not->toContain('-');
+});
+
+it('returns a stable identifier for repeated default-screen renders of the same type', function (): void {
+    $device = Device::factory()->create();
+
+    $first = ImageGenerationService::generateDefaultScreenImage($device, 'sleep');
+    $second = ImageGenerationService::generateDefaultScreenImage($device, 'sleep');
+
+    expect($second)->toBe($first);
+    Storage::disk('public')->assertExists("/images/generated/{$first}.png");
+});
+
+it('cleanupFolder preserves a hash filename referenced by a device and removes unreferenced ones', function (): void {
+    $activeHash = hash('sha256', 'active-image-bytes');
+    $inactiveHash = hash('sha256', 'inactive-image-bytes');
+
+    Device::factory()->create(['current_screen_image' => $activeHash]);
+
+    Storage::disk('public')->put("/images/generated/{$activeHash}.png", 'active-image-bytes');
+    Storage::disk('public')->put("/images/generated/{$inactiveHash}.png", 'inactive-image-bytes');
+
+    ImageGenerationService::cleanupFolder();
+
+    Storage::disk('public')->assertExists("/images/generated/{$activeHash}.png");
+    Storage::disk('public')->assertMissing("/images/generated/{$inactiveHash}.png");
+});
+
+it('DeviceImageResolver resolves a hex-hash identifier to its stored file', function (): void {
+    $device = Device::factory()->create([
+        'width' => 800,
+        'height' => 480,
+        'rotate' => 0,
+        'image_format' => ImageFormat::PNG_8BIT_GRAYSCALE->value,
+    ]);
+
+    $hash = ImageGenerationService::generateImage('<div>Test</div>', $device->id);
+
+    $resolver = new DeviceImageResolver;
+    $resolved = $resolver->resolve($device, $hash);
+
+    expect($resolved)->toBe("images/generated/{$hash}.png");
+    Storage::disk('public')->assertExists($resolved);
 });

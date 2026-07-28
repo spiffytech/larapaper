@@ -74,6 +74,8 @@ class ImageGenerationService
         ?Device $device = null,
         ?Plugin $plugin = null,
     ): string {
+        // Random name only for the throwaway temp file; the stored filename is the
+        // content hash returned by storeByContentHash() below.
         $uuid = Uuid::uuid4()->toString();
 
         try {
@@ -146,14 +148,14 @@ class ImageGenerationService
                     ->pipe($imageStage)
                     ->process();
 
-                self::storeGeneratedImageOnPublicDisk($localOutputPath, $uuid, $fileExtension);
+                $hash = self::storeByContentHash($localOutputPath, $fileExtension);
             } finally {
                 $temporaryDirectory->delete();
             }
 
-            Log::info("Generated image: $uuid");
+            Log::info("Generated image: $hash");
 
-            return $uuid;
+            return $hash;
 
         } catch (Exception $e) {
             Log::error('Failed to generate image: '.$e->getMessage());
@@ -298,24 +300,37 @@ class ImageGenerationService
     }
 
     /**
-     * Copy a pipeline output file from local disk into the public storage disk.
+     * Store the generated image using a content-addressed filename (a hash of
+     * the image bytes). This prevents the TRMNL from downloading or redrawing
+     * when the image hasn't changed.
+     *
+     * @return string The content hash used as the stored filename stem.
      *
      * @throws RuntimeException
      */
-    private static function storeGeneratedImageOnPublicDisk(string $localOutputPath, string $uuid, string $fileExtension): void
+    private static function storeByContentHash(string $localOutputPath, string $fileExtension): string
     {
         if (! file_exists($localOutputPath)) {
             throw new RuntimeException('Image file was not created: '.$localOutputPath);
         }
 
-        $storedPath = 'images/generated/'.$uuid.'.'.$fileExtension;
         $bytes = file_get_contents($localOutputPath);
         if ($bytes === false || $bytes === '') {
             throw new RuntimeException('Image file was empty or could not be read: '.$localOutputPath);
         }
+
+        $hash = hash('sha256', $bytes);
+        $storedPath = 'images/generated/'.$hash.'.'.$fileExtension;
+
+        if (Storage::disk('public')->exists($storedPath)) {
+            return $hash;
+        }
+
         if (! Storage::disk('public')->put($storedPath, $bytes)) {
             throw new RuntimeException('Failed to store generated image at: '.$storedPath);
         }
+
+        return $hash;
     }
 
     /**
@@ -506,6 +521,8 @@ class ImageGenerationService
             throw new InvalidArgumentException("Invalid image type: {$imageType}");
         }
 
+        // Random name only for the throwaway temp file; the stored filename is the
+        // content hash returned by storeByContentHash() below.
         $uuid = Uuid::uuid4()->toString();
 
         try {
@@ -568,14 +585,14 @@ class ImageGenerationService
                     ->pipe($imageStage)
                     ->process();
 
-                self::storeGeneratedImageOnPublicDisk($localOutputPath, $uuid, $fileExtension);
+                $hash = self::storeByContentHash($localOutputPath, $fileExtension);
             } finally {
                 $temporaryDirectory->delete();
             }
 
-            Log::info("Device $device->id: generated default screen image: $uuid for type: $imageType");
+            Log::info("Device $device->id: generated default screen image: $hash for type: $imageType");
 
-            return $uuid;
+            return $hash;
 
         } catch (Exception $e) {
             Log::error('Failed to generate default screen image: '.$e->getMessage());

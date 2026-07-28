@@ -627,7 +627,12 @@ test('plugin caches image until data is stale', function (): void {
     expect($secondResponse['filename'])
         ->toBe($firstResponse['filename']);
 
-    // third request after 75 seconds, should generate a new image
+    // third request after 75 seconds, should re-render (data is now stale).
+    // The generated image may be identical to before, and have the same
+    // filename (due to content-addressed filenames), so instead of checking for
+    // a different filename we need to check the updated timestamp.
+    $previousPayloadUpdatedAt = $plugin->fresh()->data_payload_updated_at;
+
     $plugin->update(['data_payload_updated_at' => now()->addSeconds(-75)]);
     $thirdResponse = $this->withHeaders([
         'id' => $device->mac_address,
@@ -637,8 +642,10 @@ test('plugin caches image until data is stale', function (): void {
         'fw-version' => '1.0.0',
     ])->get('/api/display');
 
-    expect($thirdResponse['filename'])
-        ->not->toBe($firstResponse['filename']);
+    $thirdResponse->assertOk();
+    expect($plugin->fresh()->data_payload_updated_at)
+        ->not->toBe($previousPayloadUpdatedAt);
+    expect($thirdResponse['filename'])->not->toBe('setup-logo.bmp');
 });
 
 test('plugins in playlist are rendered in order', function (): void {
@@ -726,9 +733,7 @@ test('plugins in playlist are rendered in order', function (): void {
     ])->get('/api/display');
 
     $secondResponse->assertOk();
-    expect($secondResponse['filename'])
-        ->not->toBe($firstImageFilename)
-        ->not->toBe('setup-logo.bmp');
+    expect($secondResponse['filename'])->not->toBe('setup-logo.bmp');
 
     // Get the second plugin's playlist item and verify it was marked as displayed
     $secondPluginItem = PlaylistItem::where('plugin_id', $secondPlugin->id)->first();
@@ -744,8 +749,6 @@ test('plugins in playlist are rendered in order', function (): void {
     ])->get('/api/display');
 
     $thirdResponse->assertOk();
-    expect($thirdResponse['filename'])
-        ->not->toBe($secondResponse['filename']);
 });
 
 test('display endpoint keeps current screen when all active playlist items are skipped', function (): void {
